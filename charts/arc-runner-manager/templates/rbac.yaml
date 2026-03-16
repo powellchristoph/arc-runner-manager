@@ -1,0 +1,75 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "arc-runner-manager.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arc-runner-manager.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+{{- if .Values.rbac.create }}
+# The API server requires broad cluster permissions:
+#   - namespaces: create/delete team namespaces (arc-<team>)
+#   - secrets:    read/write GitHub App credentials in team namespaces
+#   - Helm release storage: secrets in the release namespace
+#   - pods (read): runner pod status counts
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "arc-runner-manager.fullname" . }}
+  labels:
+    {{- include "arc-runner-manager.labels" . | nindent 4 }}
+rules:
+  # Namespace management
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+  # Secret management (GitHub App credentials + Helm release storage)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Pod status reads (runner count)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Helm needs these for rendering and applying chart resources
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - apiGroups: [""]
+    resources: ["services", "serviceaccounts", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "bind", "escalate"]
+
+  # ARC CRDs
+  - apiGroups: ["actions.github.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "arc-runner-manager.fullname" . }}
+  labels:
+    {{- include "arc-runner-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "arc-runner-manager.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "arc-runner-manager.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

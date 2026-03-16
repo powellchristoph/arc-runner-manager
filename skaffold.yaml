@@ -1,0 +1,47 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: arc-runner-manager
+
+build:
+  artifacts:
+    - image: arc-runner-manager-api
+      context: api
+      docker:
+        dockerfile: Dockerfile
+    - image: arc-runner-manager-frontend
+      context: frontend
+      docker:
+        dockerfile: Dockerfile
+  local:
+    push: false
+
+deploy:
+  helm:
+    releases:
+      - name: arc-runner-manager
+        chartPath: charts/arc-runner-manager
+        namespace: arc-runner-manager
+        createNamespace: true
+        setValues:
+          api.image.repository: arc-runner-manager-api
+          api.image.tag: ""           # skaffold injects the digest
+          api.image.pullPolicy: Never
+          frontend.image.repository: arc-runner-manager-frontend
+          frontend.image.tag: ""
+          frontend.image.pullPolicy: Never
+          api.apiKey: dev-key-change-me
+          api.arc.chartVersion: "0.9.3"
+          api.defaults.storageClass: local-path  # k3d / kind default
+
+portForward:
+  - resourceType: service
+    resourceName: arc-runner-manager-frontend
+    namespace: arc-runner-manager
+    port: 3000
+    localPort: 3000
+  - resourceType: service
+    resourceName: arc-runner-manager-api
+    namespace: arc-runner-manager
+    port: 8080
+    localPort: 8080

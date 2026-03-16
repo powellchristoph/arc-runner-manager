@@ -1,0 +1,15 @@
+apiVersion: v2
+name: arc-runner-manager
+description: >
+  ARC Runner Manager — a self-hosted provisioning API and web UI for managing
+  GitHub Actions Runner Controller (ARC) scale sets on Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - github-actions
+  - arc
+  - runners
+  - kubernetes
+maintainers:
+  - name: Platform Engineering

@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  api:
+    name: API — build & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 -timeout=120s ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -o /dev/null ./cmd/server
+
+      - name: Docker build (lint)
+        uses: docker/build-push-action@v5
+        with:
+          context: api
+          push: false
+          tags: arc-runner-manager-api:ci
+
+  frontend:
+    name: Frontend — build & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 -timeout=60s ./...
+
+      - name: Build
+        run: CGO_ENABLED=0 go build -o /dev/null .
+
+      - name: Docker build (lint)
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          push: false
+          tags: arc-runner-manager-frontend:ci
+
+  helm:
+    name: Helm chart — lint & template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint
+        run: helm lint charts/arc-runner-manager --set api.apiKey=ci-test-key
+
+      - name: Template render
+        run: |
+          helm template arc-runner-manager charts/arc-runner-manager \
+            --set api.apiKey=ci-test-key \
+            --namespace arc-runner-manager \
+            > /tmp/rendered.yaml
+          echo "Template rendered successfully"
+          # Validate with kubeval if available
+          if command -v kubeval &>/dev/null; then
+            kubeval --ignore-missing-schemas /tmp/rendered.yaml
+          fi
+
+  publish:
+    name: Publish images
+    runs-on: ubuntu-latest
+    needs: [api, frontend, helm]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push API
+        uses: docker/build-push-action@v5
+        with:
+          context: api
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/arc-runner-manager-api:latest
+            ghcr.io/${{ github.repository_owner }}/arc-runner-manager-api:${{ github.sha }}
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/arc-runner-manager-frontend:latest
+            ghcr.io/${{ github.repository_owner }}/arc-runner-manager-frontend:${{ github.sha }}

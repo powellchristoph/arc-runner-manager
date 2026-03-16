@@ -1,0 +1,56 @@
+# ── Binaries ──────────────────────────────────────────────────────────────────
+api/bin/
+frontend/bin/
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+*.test
+*.out
+coverage.out
+coverage.html
+
+# ── Security scan output ───────────────────────────────────────────────────────
+api/gosec.sarif
+
+# ── Helm chart cache (written by loadChart OCI pull) ──────────────────────────
+/tmp/helm-charts/
+
+# ── Local dev overrides ────────────────────────────────────────────────────────
+*.local.yaml
+*.local.env
+.env
+.env.*
+!.env.example
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+.docker/
+
+# ── Skaffold ──────────────────────────────────────────────────────────────────
+.skaffold/
+
+# ── Kubeconfig / cluster credentials ──────────────────────────────────────────
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── JetBrains IDEs ────────────────────────────────────────────────────────────
+.idea/
+*.iml
+
+# ── VS Code ───────────────────────────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# ── air (hot reload) ──────────────────────────────────────────────────────────
+tmp/
+.air.toml
+
+# ── Task ──────────────────────────────────────────────────────────────────────
+.task/
+
+*.ignore

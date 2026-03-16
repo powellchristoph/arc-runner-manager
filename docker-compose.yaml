@@ -1,0 +1,62 @@
+version: "3.9"
+
+# Local development compose. Starts both services with a mock kubeconfig.
+# For actual Helm operations you need a real kubeconfig or in-cluster context.
+#
+# Usage:
+#   docker compose up --build
+#   open http://localhost:3000
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: arc-runner-manager-api:local
+    ports:
+      - "8080:8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      API_KEY: "${API_KEY:-dev-key-change-me}"
+      ARC_CHART_VERSION: "0.9.3"
+      ARC_CONTROLLER_NS: "arc-system"
+      DEFAULT_MIN_RUNNERS: "0"
+      DEFAULT_MAX_RUNNERS: "10"
+      DEFAULT_RUNNER_IMAGE: "ghcr.io/actions/actions-runner:2.317.0"
+      DEFAULT_STORAGE_CLASS: "standard"
+      DEFAULT_STORAGE_SIZE: "1Gi"
+      DEFAULT_CPU_REQUEST: "500m"
+      DEFAULT_CPU_LIMIT: "2"
+      DEFAULT_MEMORY_REQUEST: "1Gi"
+      DEFAULT_MEMORY_LIMIT: "4Gi"
+      # In local dev, mount a kubeconfig so in-cluster auth is not required.
+      KUBECONFIG: "/kubeconfig"
+    volumes:
+      - "${KUBECONFIG:-${HOME}/.kube/config}:/kubeconfig:ro"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: arc-runner-manager-frontend:local
+    ports:
+      - "3000:3000"
+    environment:
+      LISTEN_ADDR: ":3000"
+      API_URL: "http://api:8080"
+      API_KEY: "${API_KEY:-dev-key-change-me}"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3

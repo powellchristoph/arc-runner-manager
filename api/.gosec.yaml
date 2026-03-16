@@ -1,0 +1,10 @@
+global:
+  # G104: Errors unhandled — suppressed globally.
+  # http.ResponseWriter.Write errors are unactionable after WriteHeader is called;
+  # the response is already committed. All other intentional suppressions use
+  # explicit //nolint:errcheck comments at the call site.
+  exclude-generated: false
+
+rules:
+  exclude:
+    - G104

@@ -1,0 +1,386 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  API_DIR: api
+  FRONTEND_DIR: frontend
+  CHART_DIR: charts/arc-runner-manager
+  API_IMAGE: arc-runner-manager-api
+  FRONTEND_IMAGE: arc-runner-manager-frontend
+  IMAGE_TAG:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "dev"
+  STORAGE_CLASS: hostpath
+
+env:
+  API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+
+tasks:
+
+  # ── default ────────────────────────────────────────────────────────────────
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list
+
+  # ── tidy ───────────────────────────────────────────────────────────────────
+  tidy:
+    desc: Run go mod tidy for all modules
+    cmds:
+      - task: tidy:api
+      - task: tidy:frontend
+
+  tidy:api:
+    desc: go mod tidy — api
+    dir: '{{.API_DIR}}'
+    cmds:
+      - go mod tidy
+
+  tidy:frontend:
+    desc: go mod tidy — frontend
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - go mod tidy
+
+  # ── vet ────────────────────────────────────────────────────────────────────
+  vet:
+    desc: go vet all modules
+    cmds:
+      - task: vet:api
+      - task: vet:frontend
+
+  vet:api:
+    desc: go vet — api
+    dir: '{{.API_DIR}}'
+    cmds:
+      - go vet ./...
+
+  vet:frontend:
+    desc: go vet — frontend
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - go vet ./...
+
+  # ── test ───────────────────────────────────────────────────────────────────
+  test:
+    desc: Run all tests (no cluster required)
+    cmds:
+      - task: test:api
+      - task: test:frontend
+
+  test:api:
+    desc: Run api tests with race detector
+    dir: '{{.API_DIR}}'
+    cmds:
+      - go test -race -count=1 -timeout=120s ./...
+
+  test:api:verbose:
+    desc: Run api tests — verbose output
+    dir: '{{.API_DIR}}'
+    cmds:
+      - go test -v -race -count=1 -timeout=120s ./...
+
+  test:frontend:
+    desc: Run frontend tests with race detector
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - go test -race -count=1 -timeout=60s ./...
+
+  test:frontend:verbose:
+    desc: Run frontend tests — verbose output
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - go test -v -race -count=1 -timeout=60s ./...
+
+  # ── build ──────────────────────────────────────────────────────────────────
+  build:
+    desc: Compile both binaries
+    cmds:
+      - task: build:api
+      - task: build:frontend
+
+  build:api:
+    desc: Compile api binary → api/bin/api
+    dir: '{{.API_DIR}}'
+    cmds:
+      - mkdir -p bin
+      - CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/api ./cmd/server
+    sources:
+      - '**/*.go'
+      - go.mod
+    generates:
+      - bin/api
+
+  build:frontend:
+    desc: Compile frontend binary → frontend/bin/frontend
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - mkdir -p bin
+      - CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/frontend .
+    sources:
+      - '**/*.go'
+      - go.mod
+    generates:
+      - bin/frontend
+
+  # ── run (local, no cluster) ────────────────────────────────────────────────
+  run:api:
+    desc: Run the api server locally — falls back to KUBECONFIG or ~/.kube/config
+    dir: '{{.API_DIR}}'
+    deps: [build:api]
+    cmds:
+      - ./bin/api
+    env:
+      LISTEN_ADDR: ':8080'
+      API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+      ARC_CHART_VERSION: '0.9.3'
+      ARC_CONTROLLER_NS: arc-system
+      DEFAULT_STORAGE_CLASS: '{{.STORAGE_CLASS}}'
+
+  run:frontend:
+    desc: Run the frontend server locally (requires api running on :8080)
+    dir: '{{.FRONTEND_DIR}}'
+    deps: [build:frontend]
+    cmds:
+      - ./bin/frontend
+    env:
+      LISTEN_ADDR: ':3000'
+      API_URL: 'http://localhost:8080'
+      STATIC_DIR: 'static'
+
+  dev:api:
+    desc: Run api with hot reload via air (install once with go install github.com/air-verse/air@latest)
+    dir: '{{.API_DIR}}'
+    cmds:
+      - air -c .air.toml
+    env:
+      LISTEN_ADDR: ':8080'
+      API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+      ARC_CHART_VERSION: '0.9.3'
+      ARC_CONTROLLER_NS: arc-system
+      DEFAULT_STORAGE_CLASS: '{{.STORAGE_CLASS}}'
+
+  dev:frontend:
+    desc: Run frontend with hot reload via air
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - air -c .air.toml
+    env:
+      LISTEN_ADDR: ':3000'
+      API_URL: 'http://localhost:8080'
+      STATIC_DIR: 'static'
+
+  # ── docker ─────────────────────────────────────────────────────────────────
+  docker:build:
+    desc: Build both Docker images
+    cmds:
+      - task: docker:build:api
+      - task: docker:build:frontend
+
+  docker:build:api:
+    desc: Build api Docker image
+    cmds:
+      - docker build -t {{.API_IMAGE}}:{{.IMAGE_TAG}} -t {{.API_IMAGE}}:latest {{.API_DIR}}
+
+  docker:build:frontend:
+    desc: Build frontend Docker image
+    cmds:
+      - docker build -t {{.FRONTEND_IMAGE}}:{{.IMAGE_TAG}} -t {{.FRONTEND_IMAGE}}:latest {{.FRONTEND_DIR}}
+
+  # ── compose ────────────────────────────────────────────────────────────────
+  up:
+    desc: Start both services with docker compose (builds images first)
+    cmds:
+      - docker compose up --build
+
+  up:detached:
+    desc: Start both services detached
+    cmds:
+      - docker compose up --build -d
+
+  down:
+    desc: Stop and remove compose containers
+    cmds:
+      - docker compose down
+
+  logs:
+    desc: Follow compose logs
+    cmds:
+      - docker compose logs -f
+
+  logs:api:
+    desc: Follow api container logs
+    cmds:
+      - docker compose logs -f api
+
+  logs:frontend:
+    desc: Follow frontend container logs
+    cmds:
+      - docker compose logs -f frontend
+
+  # ── helm ───────────────────────────────────────────────────────────────────
+  helm:lint:
+    desc: Lint the Helm chart
+    cmds:
+      - helm lint {{.CHART_DIR}} --set api.apiKey=lint-test-key
+
+  helm:template:
+    desc: Render the Helm chart to stdout
+    cmds:
+      - helm template arc-runner-manager {{.CHART_DIR}}
+          --namespace arc-runner-manager
+          --set api.apiKey=render-test-key
+
+  helm:install:
+    desc: Install the chart into the current cluster context
+    cmds:
+      - helm upgrade --install arc-runner-manager {{.CHART_DIR}}
+          --namespace arc-runner-manager
+          --create-namespace
+          --set api.apiKey=${API_KEY}
+          --set api.image.repository={{.API_IMAGE}}
+          --set api.image.tag={{.IMAGE_TAG}}
+          --set api.image.pullPolicy=Never
+          --set frontend.image.repository={{.FRONTEND_IMAGE}}
+          --set frontend.image.tag={{.IMAGE_TAG}}
+          --set frontend.image.pullPolicy=Never
+          --wait
+
+  helm:uninstall:
+    desc: Uninstall the chart from the current cluster
+    cmds:
+      - helm uninstall arc-runner-manager --namespace arc-runner-manager
+
+  helm:diff:
+    desc: Show pending chart changes (requires helm-diff plugin)
+    cmds:
+      - helm diff upgrade arc-runner-manager {{.CHART_DIR}}
+          --namespace arc-runner-manager
+          --set api.apiKey=${API_KEY}
+
+  test:functional:
+    desc: "End-to-end tests against a running dev environment (task run:api must be up)"
+    dir: e2e
+    cmds:
+      - go test -v -timeout 120s ./...
+    env:
+      API_URL: 'http://localhost:8080'
+      API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+      STORAGE_CLASS: '{{.STORAGE_CLASS}}'
+      # Set SECONDARY_API_KEY to test multi-token auth end-to-end:
+      # task test:functional SECONDARY_API_KEY=tok-ci-...
+      SECONDARY_API_KEY: '{{.SECONDARY_API_KEY | default ""}}'
+
+  # ── security scanning ────────────────────────────────────────────────────────────────────────────
+  sec:
+    desc: Run all security scans (vuln, gosec, trivy)
+    cmds:
+      - task: sec:vuln
+      - task: sec:gosec
+      - task: sec:trivy
+
+  sec:vuln:
+    desc: Check Go deps + stdlib for known CVEs (govulncheck)
+    cmds:
+      - |
+        export PATH="$PATH:$HOME/go/bin"
+        if ! command -v govulncheck &>/dev/null; then
+          echo "govulncheck not found — run: task sec:install"
+          exit 1
+        fi
+        govulncheck ./...
+    dir: '{{.API_DIR}}'
+
+  sec:gosec:
+    desc: Static analysis for Go security mistakes (gosec)
+    cmds:
+      - |
+        export PATH="$PATH:$HOME/go/bin"
+        if ! command -v gosec &>/dev/null; then
+          echo "gosec not found — run: task sec:install"
+          exit 1
+        fi
+        gosec -exclude=G104 -fmt sarif -out gosec.sarif ./... 2>/dev/null || gosec -exclude=G104 ./...
+    dir: '{{.API_DIR}}'
+
+  sec:trivy:
+    desc: Scan built Docker images for CVEs (trivy)
+    cmds:
+      - |
+        export PATH="$PATH:$HOME/go/bin:/usr/local/bin"
+        if ! command -v trivy &>/dev/null; then
+          echo "trivy not found — see https://aquasecurity.github.io/trivy/latest/getting-started/installation/"
+          exit 1
+        fi
+        trivy image --exit-code 1 --severity HIGH,CRITICAL {{.API_IMAGE}}:{{.IMAGE_TAG}}
+        trivy image --exit-code 1 --severity HIGH,CRITICAL {{.FRONTEND_IMAGE}}:{{.IMAGE_TAG}}
+
+  sec:install:
+    desc: Install govulncheck and gosec
+    cmds:
+      - go install golang.org/x/vuln/cmd/govulncheck@latest
+      - go install github.com/securego/gosec/v2/cmd/gosec@latest
+      - 'echo "Install trivy separately: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"'
+
+  # ── ci (runs what CI runs) ─────────────────────────────────────────────────
+  ci:
+    desc: Full CI pass — tidy check, vet, test, helm lint
+    cmds:
+      - task: tidy
+      - task: vet
+      - task: test
+      - task: helm:lint
+
+  ci:full:
+    desc: Full CI pass including security scans (requires govulncheck, gosec, trivy + built images)
+    cmds:
+      - task: tidy
+      - task: vet
+      - task: test
+      - task: helm:lint
+      - task: sec:vuln
+      - task: sec:gosec
+      - task: sec:trivy
+
+  # ── clean ──────────────────────────────────────────────────────────────────
+  clean:
+    desc: Remove all build artifacts
+    cmds:
+      - task: clean:api
+      - task: clean:frontend
+
+  clean:api:
+    desc: Remove api build artifacts
+    dir: '{{.API_DIR}}'
+    cmds:
+      - rm -rf bin/
+
+  clean:frontend:
+    desc: Remove frontend build artifacts
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - rm -rf bin/
+
+  clean:sec:
+    desc: Remove security scan output files
+    cmds:
+      - rm -f {{.API_DIR}}/gosec.sarif
+
+  clean:cache:
+    desc: Remove Helm chart cache and Go test cache
+    cmds:
+      - rm -rf /tmp/helm-charts/
+      - go clean -testcache
+
+  clean:docker:
+    desc: Remove local Docker images for this project
+    cmds:
+      - docker rmi -f $(docker images --filter=reference={{.API_IMAGE}} -q) 2>/dev/null || true
+      - docker rmi -f $(docker images --filter=reference={{.FRONTEND_IMAGE}} -q) 2>/dev/null || true
+
+  clean:all:
+    desc: Remove everything — binaries, scan output, caches, Docker images
+    cmds:
+      - task: clean
+      - task: clean:sec
+      - task: clean:cache
+      - task: clean:docker
