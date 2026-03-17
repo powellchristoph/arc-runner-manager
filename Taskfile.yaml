@@ -10,6 +10,10 @@ vars:
   IMAGE_TAG:
     sh: git rev-parse --short HEAD 2>/dev/null || echo "dev"
   STORAGE_CLASS: hostpath
+  REGISTRY: harbor.datto.net/iaas-team
+  # Target platform for Docker builds. Override for local-only dev on Apple Silicon:
+  #   PLATFORM=linux/arm64 task docker:build
+  PLATFORM: linux/amd64
 
 env:
   API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
@@ -137,7 +141,19 @@ tasks:
       DEFAULT_STORAGE_CLASS: '{{.STORAGE_CLASS}}'
 
   run:frontend:
-    desc: Run the frontend server locally (requires api running on :8080)
+    desc: Run the frontend server locally in single-key mode (requires api running on :8080)
+    dir: '{{.FRONTEND_DIR}}'
+    deps: [build:frontend]
+    cmds:
+      - ./bin/frontend
+    env:
+      LISTEN_ADDR: ':3000'
+      API_URL: 'http://localhost:8080'
+      API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+      STATIC_DIR: 'static'
+
+  run:frontend:multi:
+    desc: Run the frontend in multi-user mode — no injected API_KEY; users log in via browser
     dir: '{{.FRONTEND_DIR}}'
     deps: [build:frontend]
     cmds:
@@ -146,6 +162,21 @@ tasks:
       LISTEN_ADDR: ':3000'
       API_URL: 'http://localhost:8080'
       STATIC_DIR: 'static'
+      # API_KEY intentionally omitted — enables multi-user browser login mode.
+
+  run:api:multi:
+    desc: Run the api in multi-user mode — unauthenticated GETs allowed; writes require a token
+    dir: '{{.API_DIR}}'
+    deps: [build:api]
+    cmds:
+      - ./bin/api
+    env:
+      LISTEN_ADDR: ':8080'
+      API_TOKENS: '{{.API_TOKENS | default "{\"admin\":\"dev-key-change-me\"}"}}'
+      ALLOW_READONLY_UNAUTHENTICATED: 'true'
+      ARC_CHART_VERSION: '0.9.3'
+      ARC_CONTROLLER_NS: arc-system
+      DEFAULT_STORAGE_CLASS: '{{.STORAGE_CLASS}}'
 
   dev:api:
     desc: Run api with hot reload via air (install once with go install github.com/air-verse/air@latest)
@@ -159,8 +190,32 @@ tasks:
       ARC_CONTROLLER_NS: arc-system
       DEFAULT_STORAGE_CLASS: '{{.STORAGE_CLASS}}'
 
+  dev:api:multi:
+    desc: Run api in multi-user mode with hot reload
+    dir: '{{.API_DIR}}'
+    cmds:
+      - air -c .air.toml
+    env:
+      LISTEN_ADDR: ':8080'
+      API_TOKENS: '{{.API_TOKENS | default "{\"admin\":\"dev-key-change-me\"}"}}'
+      ALLOW_READONLY_UNAUTHENTICATED: 'true'
+      ARC_CHART_VERSION: '0.9.3'
+      ARC_CONTROLLER_NS: arc-system
+      DEFAULT_STORAGE_CLASS: '{{.STORAGE_CLASS}}'
+
   dev:frontend:
-    desc: Run frontend with hot reload via air
+    desc: Run frontend with hot reload via air (single-key mode)
+    dir: '{{.FRONTEND_DIR}}'
+    cmds:
+      - air -c .air.toml
+    env:
+      LISTEN_ADDR: ':3000'
+      API_URL: 'http://localhost:8080'
+      API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+      STATIC_DIR: 'static'
+
+  dev:frontend:multi:
+    desc: Run frontend with hot reload in multi-user mode
     dir: '{{.FRONTEND_DIR}}'
     cmds:
       - air -c .air.toml
@@ -168,6 +223,7 @@ tasks:
       LISTEN_ADDR: ':3000'
       API_URL: 'http://localhost:8080'
       STATIC_DIR: 'static'
+      # API_KEY intentionally omitted — enables multi-user browser login mode.
 
   # ── docker ─────────────────────────────────────────────────────────────────
   docker:build:
@@ -177,14 +233,52 @@ tasks:
       - task: docker:build:frontend
 
   docker:build:api:
-    desc: Build api Docker image
+    desc: "Build api Docker image for PLATFORM (default: linux/amd64)"
     cmds:
-      - docker build -t {{.API_IMAGE}}:{{.IMAGE_TAG}} -t {{.API_IMAGE}}:latest {{.API_DIR}}
+      - docker buildx build --platform {{.PLATFORM}} -t {{.API_IMAGE}}:{{.IMAGE_TAG}} -t {{.API_IMAGE}}:latest {{.API_DIR}}
 
   docker:build:frontend:
-    desc: Build frontend Docker image
+    desc: "Build frontend Docker image for PLATFORM (default: linux/amd64)"
     cmds:
-      - docker build -t {{.FRONTEND_IMAGE}}:{{.IMAGE_TAG}} -t {{.FRONTEND_IMAGE}}:latest {{.FRONTEND_DIR}}
+      - docker buildx build --platform {{.PLATFORM}} -t {{.FRONTEND_IMAGE}}:{{.IMAGE_TAG}} -t {{.FRONTEND_IMAGE}}:latest {{.FRONTEND_DIR}}
+
+  # ── docker push ─────────────────────────────────────────────────────────────
+  # Pushes locally-built images to a remote registry.
+  #
+  # Versioning:
+  #   By default, images are tagged with the current git SHA (IMAGE_TAG).
+  #   Pass VERSION to push a human-readable release tag alongside the SHA:
+  #
+  #     REGISTRY=ghcr.io/your-org task docker:push                  → :abc1234 + :latest
+  #     REGISTRY=ghcr.io/your-org task docker:push VERSION=0.2.0    → :0.2.0   + :latest
+  #
+  #   Both the versioned tag and :latest are always pushed.
+  #   Run `task docker:build` first if you haven't built recently.
+  docker:push:
+    desc: "Push both images to REGISTRY (default: ghcr.io/your-org). Optional: VERSION=x.y.z"
+    cmds:
+      - task: docker:push:api
+      - task: docker:push:frontend
+
+  docker:push:api:
+    desc: "Push api image — REGISTRY=ghcr.io/your-org [VERSION=x.y.z]"
+    vars:
+      PUSH_TAG: '{{.VERSION | default .IMAGE_TAG}}'
+    cmds:
+      - docker tag {{.API_IMAGE}}:{{.IMAGE_TAG}} {{.REGISTRY}}/{{.API_IMAGE}}:{{.PUSH_TAG}}
+      - docker push {{.REGISTRY}}/{{.API_IMAGE}}:{{.PUSH_TAG}}
+      - docker tag {{.API_IMAGE}}:{{.IMAGE_TAG}} {{.REGISTRY}}/{{.API_IMAGE}}:latest
+      - docker push {{.REGISTRY}}/{{.API_IMAGE}}:latest
+
+  docker:push:frontend:
+    desc: "Push frontend image — REGISTRY=ghcr.io/your-org [VERSION=x.y.z]"
+    vars:
+      PUSH_TAG: '{{.VERSION | default .IMAGE_TAG}}'
+    cmds:
+      - docker tag {{.FRONTEND_IMAGE}}:{{.IMAGE_TAG}} {{.REGISTRY}}/{{.FRONTEND_IMAGE}}:{{.PUSH_TAG}}
+      - docker push {{.REGISTRY}}/{{.FRONTEND_IMAGE}}:{{.PUSH_TAG}}
+      - docker tag {{.FRONTEND_IMAGE}}:{{.IMAGE_TAG}} {{.REGISTRY}}/{{.FRONTEND_IMAGE}}:latest
+      - docker push {{.REGISTRY}}/{{.FRONTEND_IMAGE}}:latest
 
   # ── compose ────────────────────────────────────────────────────────────────
   up:
@@ -232,18 +326,13 @@ tasks:
 
   helm:install:
     desc: Install the chart into the current cluster context
+    vars:
+      VALUES: '{{.VALUES_FILE | default "{{.CHART_DIR}}/values.yaml"}}'
     cmds:
       - helm upgrade --install arc-runner-manager {{.CHART_DIR}}
           --namespace arc-runner-manager
           --create-namespace
-          --set api.apiKey=${API_KEY}
-          --set api.image.repository={{.API_IMAGE}}
-          --set api.image.tag={{.IMAGE_TAG}}
-          --set api.image.pullPolicy=Never
-          --set frontend.image.repository={{.FRONTEND_IMAGE}}
-          --set frontend.image.tag={{.IMAGE_TAG}}
-          --set frontend.image.pullPolicy=Never
-          --wait
+          --values {{.VALUES}}
 
   helm:uninstall:
     desc: Uninstall the chart from the current cluster
@@ -252,13 +341,15 @@ tasks:
 
   helm:diff:
     desc: Show pending chart changes (requires helm-diff plugin)
+    vars:
+      VALUES: '{{.VALUES_FILE | default "{{.CHART_DIR}}/values.yaml"}}'
     cmds:
       - helm diff upgrade arc-runner-manager {{.CHART_DIR}}
           --namespace arc-runner-manager
-          --set api.apiKey=${API_KEY}
+          --values {{.VALUES}}
 
   test:functional:
-    desc: "End-to-end tests against a running dev environment (task run:api must be up)"
+    desc: "End-to-end tests (single-key mode) against a running dev environment (task run:api must be up)"
     dir: e2e
     cmds:
       - go test -v -timeout 120s ./...
@@ -269,6 +360,17 @@ tasks:
       # Set SECONDARY_API_KEY to test multi-token auth end-to-end:
       # task test:functional SECONDARY_API_KEY=tok-ci-...
       SECONDARY_API_KEY: '{{.SECONDARY_API_KEY | default ""}}'
+
+  test:functional:multi:
+    desc: "End-to-end tests (multi-user / readonly mode) — requires task run:api:multi to be up"
+    dir: e2e
+    cmds:
+      - go test -v -timeout 120s ./...
+    env:
+      API_URL: 'http://localhost:8080'
+      API_KEY: '{{.API_KEY | default "dev-key-change-me"}}'
+      STORAGE_CLASS: '{{.STORAGE_CLASS}}'
+      ALLOW_READONLY_UNAUTHENTICATED: 'true'
 
   # ── security scanning ────────────────────────────────────────────────────────────────────────────
   sec:

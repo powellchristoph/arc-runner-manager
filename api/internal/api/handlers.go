@@ -11,9 +11,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	helmrelease "helm.sh/helm/v3/pkg/release"
 
-	helmclient "github.com/powellchristoph/arc-runner-managerinternal/helm"
-	"github.com/powellchristoph/arc-runner-managerinternal/models"
-	"github.com/powellchristoph/arc-runner-managerpkg/config"
+	helmclient "github.com/powellchristoph/arc-runner-manager/internal/helm"
+	"github.com/powellchristoph/arc-runner-manager/internal/models"
+	"github.com/powellchristoph/arc-runner-manager/pkg/config"
 )
 
 // HelmClient is the interface the Handler uses to interact with Helm.
@@ -23,6 +23,7 @@ type HelmClient interface {
 	Get(ctx context.Context, team string) (*helmrelease.Release, error)
 	Install(ctx context.Context, rss *models.RunnerScaleSet) (*helmrelease.Release, error)
 	Upgrade(ctx context.Context, rss *models.RunnerScaleSet) (*helmrelease.Release, error)
+	UpgradeChart(ctx context.Context, team string) error
 	Uninstall(ctx context.Context, team string) error
 }
 
@@ -55,10 +56,10 @@ var NewHandlerWithClients = NewHandler
 // RegisterRoutes mounts all API v1 routes onto the given router.
 // Do NOT register /healthz here — it belongs outside the auth group.
 func (h *Handler) RegisterRoutes(r chi.Router) {
-
 	r.Route("/api/v1/runners", func(r chi.Router) {
 		r.Get("/", h.ListRunners)
 		r.Post("/", h.CreateRunner)
+		r.Post("/upgrade-chart", h.UpgradeAllRunners)
 		r.Get("/{name}", h.GetRunner)
 		r.Put("/{name}", h.UpdateRunner)
 		r.Delete("/{name}", h.DeleteRunner)
@@ -68,6 +69,57 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 // Healthz is a simple liveness probe endpoint.
 func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// GetDefaults returns the server-configured runner defaults so the UI can
+// pre-populate the create form with the operator's chosen values.
+func (h *Handler) GetDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"minRunners":      h.cfg.DefaultMinRunners,
+		"maxRunners":      h.cfg.DefaultMaxRunners,
+		"runnerImage":     h.cfg.DefaultRunnerImage,
+		"storageClass":    h.cfg.DefaultStorageClass,
+		"storageSize":     h.cfg.DefaultStorageSize,
+		"cpuRequest":      h.cfg.DefaultCPURequest,
+		"cpuLimit":        h.cfg.DefaultCPULimit,
+		"memoryRequest":   h.cfg.DefaultMemoryRequest,
+		"memoryLimit":     h.cfg.DefaultMemoryLimit,
+		"arcChartVersion": h.cfg.ARCChartVersion,
+	})
+}
+
+// UpgradeAllRunners upgrades every managed runner scale set to the currently
+// configured ARC chart version, preserving each runner's existing values.
+// Runners already at the target version are skipped.
+//
+// POST /api/v1/runners/upgrade-chart
+func (h *Handler) UpgradeAllRunners(w http.ResponseWriter, r *http.Request) {
+	releases, err := h.helm.List(r.Context())
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "failed to list releases", err)
+		return
+	}
+
+	var upgraded, skipped, failed []string
+	for _, rel := range releases {
+		team := helmclient.TeamFromRelease(rel.Name)
+		if rel.Chart.Metadata.Version == h.cfg.ARCChartVersion {
+			skipped = append(skipped, team)
+			continue
+		}
+		if err := h.helm.UpgradeChart(r.Context(), team); err != nil {
+			h.logger.Error("chart upgrade failed", "team", team, "err", err)
+			failed = append(failed, team)
+		} else {
+			upgraded = append(upgraded, team)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"upgraded": upgraded,
+		"skipped":  skipped,
+		"failed":   failed,
+	})
 }
 
 // ListRunners returns all ARC runner scale sets managed by this application.
@@ -211,9 +263,13 @@ func (h *Handler) DeleteRunner(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete the namespace (this also removes the GitHub App secret).
+	// Use a background context so request cancellation or the HTTP timeout
+	// does not abort the cleanup after the Helm uninstall has succeeded.
 	ns := helmclient.Namespace(name)
-	if err := h.k8s.DeleteNamespace(ctx, ns); err != nil {
-		h.logger.Warn("failed to delete namespace after uninstall", "namespace", ns, "err", err)
+	if err := h.k8s.DeleteNamespace(context.Background(), ns); err != nil {
+		h.logger.Error("failed to delete namespace after uninstall", "namespace", ns, "err", err)
+	} else {
+		h.logger.Info("namespace deletion initiated", "namespace", ns)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -258,7 +314,7 @@ func (h *Handler) releaseToModel(ctx context.Context, rel *helmrelease.Release) 
 	}
 
 	if cm, ok := vals["containerMode"].(map[string]interface{}); ok {
-		if wv, ok := cm["kubernetesModeWorkVolume"].(map[string]interface{}); ok {
+		if wv, ok := cm["kubernetesModeWorkVolumeClaim"].(map[string]interface{}); ok {
 			if sc, ok := wv["storageClassName"].(string); ok {
 				rss.StorageClass = sc
 			}

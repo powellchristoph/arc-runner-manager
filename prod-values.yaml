@@ -1,0 +1,68 @@
+# ── API backend ───────────────────────────────────────────────────────────────
+api:
+  image:
+    repository: harbor.datto.net/iaas-team/arc-runner-manager-api
+    tag: "0.0.8"
+
+  existingSecret: "arc-runner-manager-tokens"
+  existingSecretKey: "api-tokens"
+
+  allowReadonlyUnauthenticated: true
+
+  # Ingress for the API (typically internal / restricted)
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    host: "arc-api.use1-prod0-arc.k8s.datto.io"
+    tls:
+      enabled: true
+      secretName: "arc-api-tls"
+
+  # ARC chart configuration
+  arc:
+    chartVersion: "0.13.1"
+
+  # Platform-wide runner defaults (teams override per scale set)
+  defaults:
+    minRunners: 0
+    maxRunners: 5
+    runnerImage: "ghcr.io/actions/actions-runner:2.317.0"
+    storageClass: "csi-cinder-sc-delete"
+    storageSize: "10Gi"
+    cpuRequest: "500m"
+    cpuLimit: "2"
+    memoryRequest: "1Gi"
+    memoryLimit: "4Gi"
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend:
+  image:
+    repository: harbor.datto.net/iaas-team/arc-runner-manager-frontend
+    tag: "0.0.8"
+
+  #existingSecret: "arc-runner-frontend-token"
+  #existingSecretKey: "api-key"
+
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    host: "arc-ui.use1-prod0-arc.k8s.datto.io"
+    tls:
+      enabled: true
+      secretName: "arc-ui-tls"
+
+
+# ── RBAC ──────────────────────────────────────────────────────────────────────
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: "arc-runner-manager"
+  annotations: {}

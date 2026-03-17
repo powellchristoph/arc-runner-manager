@@ -9,19 +9,141 @@
 'use strict';
 
 // ── state ─────────────────────────────────────────────────────────────────────
-let editingName = null;   // null = create mode, string = edit mode
-let pendingDelete = null; // name awaiting confirmation
+let editingName   = null;   // null = create mode, string = edit mode
+let pendingDelete = null;   // name awaiting confirmation
+let authenticated = false;  // true once auth check passes or login succeeds
+let multiUserMode = false;  // true when /auth/me endpoint exists (API_KEY not set)
+let serverDefaults = {};    // populated from GET /api/v1/defaults on load
 
 // ── bootstrap modal references (initialised after DOM ready) ──────────────────
-let runnerModal, deleteModal, detailCanvas;
+let runnerModal, deleteModal, detailCanvas, loginModal;
 
 // ── init ──────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   runnerModal  = new bootstrap.Modal(document.getElementById('runnerModal'));
   deleteModal  = new bootstrap.Modal(document.getElementById('deleteModal'));
   detailCanvas = new bootstrap.Offcanvas(document.getElementById('detailCanvas'));
+  loginModal   = new bootstrap.Modal(document.getElementById('loginModal'));
+
+  await checkAuthState();
+  await loadDefaults();
+  renderUI();
   loadRunners();
 });
+
+// ── defaults ──────────────────────────────────────────────────────────────────
+
+async function loadDefaults() {
+  try {
+    serverDefaults = await apiFetch('/v1/defaults');
+  } catch (_) {
+    // Non-fatal — form will show empty optional fields.
+  }
+}
+
+// ── auth ──────────────────────────────────────────────────────────────────────
+
+async function checkAuthState() {
+  try {
+    const res = await fetch('/auth/me');
+    const data = await res.json();
+    // multiUser=false → single-key mode: always authenticated, no login UI.
+    // multiUser=true  → multi-user mode: users must log in with a token.
+    authenticated = data.authenticated === true;
+    multiUserMode = data.multiUser === true;
+  } catch (_) {
+    // If /auth/me is unreachable, show read-only view with no login UI.
+    authenticated = false;
+    multiUserMode = false;
+  }
+}
+
+function renderUI() {
+  const newBtn = document.getElementById('new-runner-btn');
+  if (newBtn) newBtn.classList.toggle('d-none', !authenticated);
+  renderAuthControls();
+}
+
+async function upgradeAllCharts() {
+  showSpinner(true);
+  try {
+    const result = await apiFetch('/v1/runners/upgrade-chart', { method: 'POST' });
+    const up = (result.upgraded || []).join(', ') || 'none';
+    const msg = `Upgraded: ${up}.` +
+      (result.failed?.length ? ` Failed: ${result.failed.join(', ')}.` : '');
+    showToast(result.failed?.length ? 'warning' : 'success', msg);
+    await loadRunners();
+  } catch (err) {
+    showToast('danger', `Chart upgrade failed: ${err.message}`);
+  } finally {
+    showSpinner(false);
+  }
+}
+
+function renderAuthControls() {
+  const el = document.getElementById('auth-controls');
+  if (!el) return;
+  if (!multiUserMode) {
+    el.innerHTML = '';
+    return;
+  }
+  if (authenticated) {
+    el.innerHTML = `
+      <button class="btn btn-outline-light btn-sm" onclick="logout()">
+        <i class="bi bi-box-arrow-right me-1"></i>Sign Out
+      </button>`;
+  } else {
+    el.innerHTML = `
+      <button class="btn btn-outline-light btn-sm"
+              data-bs-toggle="modal" data-bs-target="#loginModal">
+        <i class="bi bi-key me-1"></i>Sign In
+      </button>`;
+  }
+}
+
+async function submitLogin() {
+  const tokenInput = document.getElementById('login-token-input');
+  const errorEl    = document.getElementById('login-error');
+  const token      = tokenInput.value.trim();
+  errorEl.classList.add('d-none');
+
+  if (!token) {
+    errorEl.textContent = 'Token is required.';
+    errorEl.classList.remove('d-none');
+    return;
+  }
+  try {
+    const res = await fetch('/auth/login', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ token }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.authenticated) {
+      errorEl.textContent = data.error || 'Invalid token.';
+      errorEl.classList.remove('d-none');
+      return;
+    }
+    authenticated = true;
+    tokenInput.value = '';
+    loginModal.hide();
+    await loadDefaults();
+    renderUI();
+    await loadRunners();
+  } catch (err) {
+    errorEl.textContent = 'Login failed: ' + err.message;
+    errorEl.classList.remove('d-none');
+  }
+}
+
+async function logout() {
+  try {
+    await fetch('/auth/logout', { method: 'POST' });
+  } catch (_) {}
+  authenticated = false;
+  renderUI();
+  await loadRunners();
+}
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 
@@ -49,6 +171,7 @@ async function loadRunners() {
   showSpinner(true);
   try {
     const data = await apiFetch('/v1/runners');
+    document.getElementById('alert-area').innerHTML = '';
     renderTable(data.items || []);
     document.getElementById('runner-count').textContent = data.total ?? 0;
   } catch (err) {
@@ -62,13 +185,21 @@ async function loadRunners() {
 function renderTable(runners) {
   const tbody = document.getElementById('runner-tbody');
 
+  const anyOutdated = authenticated && serverDefaults.arcChartVersion && runners.some(r =>
+    r.status?.chartVersion && r.status.chartVersion !== serverDefaults.arcChartVersion
+  );
+  const upgradeBtn = document.getElementById('upgrade-chart-btn');
+  if (upgradeBtn) upgradeBtn.classList.toggle('d-none', !anyOutdated);
+
   if (runners.length === 0) {
+    const createLink = authenticated
+      ? `<a href="#" onclick="openCreate(); return false">Create the first one.</a>`
+      : '';
     tbody.innerHTML = `
       <tr>
         <td colspan="8" class="text-center py-5 text-muted">
           <i class="bi bi-inbox fs-3 d-block mb-2"></i>
-          No runner scale sets found.
-          <a href="#" onclick="openCreate(); return false">Create the first one.</a>
+          No runner scale sets found. ${createLink}
         </td>
       </tr>`;
     return;
@@ -77,11 +208,30 @@ function renderTable(runners) {
   tbody.innerHTML = runners.map(r => {
     const status  = r.status || {};
     const badge   = statusBadge(status.helmStatus);
+    const chartOutdated = serverDefaults.arcChartVersion &&
+      status.chartVersion &&
+      status.chartVersion !== serverDefaults.arcChartVersion;
+    const chartBadge = chartOutdated
+      ? `<span class="badge bg-warning-subtle text-warning-emphasis ms-1"
+               title="Installed: ${e(status.chartVersion)} → Target: ${e(serverDefaults.arcChartVersion)}">Update available</span>`
+      : '';
     const running = status.currentRunners ?? 0;
     const pending = status.pendingRunners  ?? 0;
     const secret  = status.secretExists
       ? '<i class="bi bi-key-fill text-success" title="Secret present"></i>'
       : '<i class="bi bi-key text-warning" title="Secret missing"></i>';
+
+    const actions = authenticated ? `
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" title="Edit"
+                    onclick="openEdit('${e(r.name)}')">
+              <i class="bi bi-pencil"></i>
+            </button>
+            <button class="btn btn-outline-danger" title="Delete"
+                    onclick="confirmDelete('${e(r.name)}')">
+              <i class="bi bi-trash3"></i>
+            </button>
+          </div>` : '';
 
     return `
       <tr>
@@ -98,23 +248,12 @@ function renderTable(runners) {
         <td class="text-truncate" style="max-width:180px">
           <code style="font-size:0.7rem" title="${e(r.runnerImage || '')}">${e(shortImage(r.runnerImage) || '—')}</code>
         </td>
-        <td>${badge} ${secret}</td>
+        <td>${badge}${chartBadge} ${secret}</td>
         <td>
           <span class="badge bg-success-subtle text-success-emphasis">${running} running</span>
           ${pending > 0 ? `<span class="badge bg-warning-subtle text-warning-emphasis">${pending} pending</span>` : ''}
         </td>
-        <td class="text-end">
-          <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" title="Edit"
-                    onclick="openEdit('${e(r.name)}')">
-              <i class="bi bi-pencil"></i>
-            </button>
-            <button class="btn btn-outline-danger" title="Delete"
-                    onclick="confirmDelete('${e(r.name)}')">
-              <i class="bi bi-trash3"></i>
-            </button>
-          </div>
-        </td>
+        <td class="text-end">${actions}</td>
       </tr>`;
   }).join('');
 }
@@ -158,13 +297,20 @@ function setCredentialsRequired(required) {
 
 function clearForm() {
   ['name','runnerScaleSetName','githubConfigUrl','githubAppId','githubAppInstallationId',
-   'githubAppPrivateKey','runnerImage','cpuRequest','cpuLimit','memoryRequest','memoryLimit',
-   'storageClass','storageSize'].forEach(f => {
+   'githubAppPrivateKey'].forEach(f => {
     const el = document.getElementById('f-' + f);
     if (el) el.value = '';
   });
-  document.getElementById('f-minRunners').value = '0';
-  document.getElementById('f-maxRunners').value = '10';
+  const d = serverDefaults;
+  document.getElementById('f-minRunners').value   = d.minRunners   ?? 0;
+  document.getElementById('f-maxRunners').value   = d.maxRunners   ?? 10;
+  document.getElementById('f-runnerImage').value  = d.runnerImage  ?? '';
+  document.getElementById('f-cpuRequest').value   = d.cpuRequest   ?? '';
+  document.getElementById('f-cpuLimit').value     = d.cpuLimit     ?? '';
+  document.getElementById('f-memoryRequest').value = d.memoryRequest ?? '';
+  document.getElementById('f-memoryLimit').value  = d.memoryLimit  ?? '';
+  document.getElementById('f-storageClass').value = d.storageClass ?? '';
+  document.getElementById('f-storageSize').value  = d.storageSize  ?? '';
 }
 
 function populateForm(r) {
@@ -302,6 +448,15 @@ async function openDetail(name) {
 function renderDetail(r) {
   const s = r.status || {};
   const res = r.resources || {};
+
+  const detailActions = authenticated ? `
+      <button class="btn btn-sm btn-outline-primary" onclick="openEdit('${e(r.name)}'); bootstrap.Offcanvas.getInstance(document.getElementById('detailCanvas')).hide()">
+        <i class="bi bi-pencil me-1"></i>Edit
+      </button>
+      <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete('${e(r.name)}'); bootstrap.Offcanvas.getInstance(document.getElementById('detailCanvas')).hide()">
+        <i class="bi bi-trash3 me-1"></i>Delete
+      </button>` : '';
+
   return `
     <dl class="row">
       <dt class="col-5">Namespace</dt>       <dd class="col-7"><code>${e(s.namespace || '')}</code></dd>
@@ -327,14 +482,7 @@ function renderDetail(r) {
       <dt class="col-5">Storage Size</dt>    <dd class="col-7">${e(r.storageSize || '—')}</dd>
     </dl>
     <hr>
-    <div class="d-flex gap-2 mt-3">
-      <button class="btn btn-sm btn-outline-primary" onclick="openEdit('${e(r.name)}'); bootstrap.Offcanvas.getInstance(document.getElementById('detailCanvas')).hide()">
-        <i class="bi bi-pencil me-1"></i>Edit
-      </button>
-      <button class="btn btn-sm btn-outline-danger" onclick="confirmDelete('${e(r.name)}'); bootstrap.Offcanvas.getInstance(document.getElementById('detailCanvas')).hide()">
-        <i class="bi bi-trash3 me-1"></i>Delete
-      </button>
-    </div>`;
+    <div class="d-flex gap-2 mt-3">${detailActions}</div>`;
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────────────

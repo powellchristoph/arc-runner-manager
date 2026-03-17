@@ -47,11 +47,16 @@ func TestAuth(t *testing.T) {
 
 	t.Run("no token", func(t *testing.T) {
 		resp := c.doWithKey(t, http.MethodGet, "/api/v1/runners", "")
-		resp.assertStatus(t, http.StatusUnauthorized)
-		var body map[string]any
-		resp.decode(t, &body)
-		if _, ok := body["error"]; !ok {
-			t.Error("401 response should include error field")
+		if readonlyMode() {
+			// In readonly mode, unauthenticated GETs are permitted.
+			resp.assertStatus(t, http.StatusOK)
+		} else {
+			resp.assertStatus(t, http.StatusUnauthorized)
+			var body map[string]any
+			resp.decode(t, &body)
+			if _, ok := body["error"]; !ok {
+				t.Error("401 response should include error field")
+			}
 		}
 	})
 
@@ -307,4 +312,60 @@ func TestUpdateNonExistent(t *testing.T) {
 		"maxRunners": 3,
 	})
 	resp.assertStatus(t, http.StatusNotFound)
+}
+
+// TestReadonlyAuth verifies that unauthenticated GET requests are permitted and
+// unauthenticated write requests are rejected when ALLOW_READONLY_UNAUTHENTICATED=true.
+// Skipped when the API is not running in readonly mode.
+func TestReadonlyAuth(t *testing.T) {
+	if !readonlyMode() {
+		t.Skip("skipping readonly auth tests (ALLOW_READONLY_UNAUTHENTICATED not set)")
+	}
+
+	c := newClient(t)
+	checkAPIAvailable(t, c)
+
+	t.Run("GET runners without token returns 200", func(t *testing.T) {
+		resp := c.doWithKey(t, http.MethodGet, "/api/v1/runners", "")
+		resp.assertStatus(t, http.StatusOK)
+		var body map[string]any
+		resp.decode(t, &body)
+		if _, ok := body["items"]; !ok {
+			t.Error("response missing 'items' field")
+		}
+	})
+
+	t.Run("GET runner by name without token returns 200 or 404", func(t *testing.T) {
+		resp := c.doWithKey(t, http.MethodGet, "/api/v1/runners/does-not-exist-e2e", "")
+		// 404 is fine — it means auth passed but runner doesn't exist.
+		// 401 would indicate readonly mode is not actually active.
+		if resp.StatusCode == http.StatusUnauthorized {
+			t.Errorf("expected 200 or 404 for unauthenticated GET, got 401")
+		}
+	})
+
+	t.Run("GET with invalid token still returns 200", func(t *testing.T) {
+		resp := c.doWithKey(t, http.MethodGet, "/api/v1/runners", "bad-token")
+		resp.assertStatus(t, http.StatusOK)
+	})
+
+	t.Run("GET with valid token returns 200", func(t *testing.T) {
+		resp := c.get(t, "/api/v1/runners")
+		resp.assertStatus(t, http.StatusOK)
+	})
+
+	t.Run("POST without token returns 401", func(t *testing.T) {
+		resp := c.doWithKey(t, http.MethodPost, "/api/v1/runners", "")
+		resp.assertStatus(t, http.StatusUnauthorized)
+	})
+
+	t.Run("PUT without token returns 401", func(t *testing.T) {
+		resp := c.doWithKey(t, http.MethodPut, "/api/v1/runners/any-team", "")
+		resp.assertStatus(t, http.StatusUnauthorized)
+	})
+
+	t.Run("DELETE without token returns 401", func(t *testing.T) {
+		resp := c.doWithKey(t, http.MethodDelete, "/api/v1/runners/any-team", "")
+		resp.assertStatus(t, http.StatusUnauthorized)
+	})
 }

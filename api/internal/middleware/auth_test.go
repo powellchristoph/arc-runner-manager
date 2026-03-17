@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/powellchristoph/arc-runner-managerinternal/middleware"
+	"github.com/powellchristoph/arc-runner-manager/internal/middleware"
 )
 
 // ── TokenStore unit tests ─────────────────────────────────────────────────────
@@ -167,6 +167,126 @@ func TestBearerAuth_EmptyBearerValue(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for empty bearer value, got %d", rec.Code)
+	}
+}
+
+// ── ReadonlyBearerAuth middleware tests ───────────────────────────────────────
+
+func applyReadonlyMiddleware(store *middleware.TokenStore) http.Handler {
+	return middleware.ReadonlyBearerAuth(store)(http.HandlerFunc(okHandler))
+}
+
+// GET without any token should pass through (read-only access).
+func TestReadonlyBearerAuth_GET_NoToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runners", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for unauthenticated GET, got %d", rec.Code)
+	}
+	// No token in context → TokenNameFromContext returns "unknown".
+	if got := rec.Header().Get("X-Token-Name"); got != "unknown" {
+		t.Errorf("expected token name %q, got %q", "unknown", got)
+	}
+}
+
+// GET with a valid token should pass through AND store the token name in context.
+func TestReadonlyBearerAuth_GET_ValidToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runners", nil)
+	req.Header.Set("Authorization", "Bearer tok-fe-abc")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for authenticated GET, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-Token-Name"); got != "frontend" {
+		t.Errorf("expected token name %q, got %q", "frontend", got)
+	}
+}
+
+// GET with an invalid token should still pass through (read-only).
+func TestReadonlyBearerAuth_GET_InvalidToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runners", nil)
+	req.Header.Set("Authorization", "Bearer bad-token")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for GET with invalid token, got %d", rec.Code)
+	}
+	// Invalid token → no name stored, falls back to "unknown".
+	if got := rec.Header().Get("X-Token-Name"); got != "unknown" {
+		t.Errorf("expected %q, got %q", "unknown", got)
+	}
+}
+
+// HEAD without a token should also pass through (same as GET).
+func TestReadonlyBearerAuth_HEAD_NoToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodHead, "/api/v1/runners", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for unauthenticated HEAD, got %d", rec.Code)
+	}
+}
+
+// POST without a token must be rejected.
+func TestReadonlyBearerAuth_POST_NoToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runners", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated POST, got %d", rec.Code)
+	}
+}
+
+// POST with a valid token must be allowed.
+func TestReadonlyBearerAuth_POST_ValidToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runners", nil)
+	req.Header.Set("Authorization", "Bearer tok-fe-abc")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for authenticated POST, got %d", rec.Code)
+	}
+}
+
+// PUT without a token must be rejected.
+func TestReadonlyBearerAuth_PUT_NoToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/runners/team", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated PUT, got %d", rec.Code)
+	}
+}
+
+// DELETE without a token must be rejected.
+func TestReadonlyBearerAuth_DELETE_NoToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/runners/team", nil)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated DELETE, got %d", rec.Code)
+	}
+}
+
+// POST with an invalid token must be rejected.
+func TestReadonlyBearerAuth_POST_InvalidToken(t *testing.T) {
+	h := applyReadonlyMiddleware(makeStore())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runners", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for POST with invalid token, got %d", rec.Code)
 	}
 }
 

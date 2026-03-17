@@ -14,19 +14,56 @@ api:
     type: ClusterIP
     port: 8080
 
-  # Token authentication.
+  # ── Token authentication ────────────────────────────────────────────────────
   # Option A — supply a JSON token map directly (not recommended for production):
   #   apiTokens: '{"frontend":"tok-abc","ci":"tok-def","admin":"tok-xyz"}'
-  # Option B — reference an existing Secret (recommended):
+  # Option B — reference an existing Secret (recommended for production):
   #   existingSecret: "arc-runner-manager-tokens"
-  #   existingSecretKey: "api-tokens"   # key inside the secret holding the JSON
+  #   existingSecretKey: "api-tokens"   # key inside the secret holding the JSON map
+  # Option C — legacy single token (becomes {"default":"<key>"}):
+  #   apiKey: "my-secret-token"
   #
   # The secret value must be a JSON object: {"name":"token-value", ...}
-  # Legacy single-token: set apiKey instead (becomes {"default":"<key>"})
   apiTokens: ""          # JSON map of name→token. Takes precedence over apiKey.
   apiKey: ""             # Legacy single-token fallback. Ignored if apiTokens is set.
   existingSecret: ""     # Name of existing Secret. Takes precedence over both above.
   existingSecretKey: "api-tokens"
+
+  # ── Read-only unauthenticated access ────────────────────────────────────────
+  # When false (default): all requests require a Bearer token — single-key mode.
+  # When true: GET requests are permitted without a token (read-only public access).
+  #   POST / PUT / DELETE still require a valid token.
+  #   Pair with frontend.apiKey="" so the frontend runs in multi-user mode and
+  #   exposes a browser login form for write access.
+  #
+  # Example multi-user configuration:
+  #   api:
+  #     apiTokens: '{"admin":"tok-admin-xyz","ci":"tok-ci-abc"}'
+  #     allowReadonlyUnauthenticated: true
+  #   frontend:
+  #     apiKey: ""   # omit to enable multi-user browser login
+  allowReadonlyUnauthenticated: false
+
+  # ── Kubeconfig ──────────────────────────────────────────────────────────────
+  # The API needs a kubeconfig to talk to the cluster (Helm installs, k8s reads).
+  # When running inside the cluster with a suitable ServiceAccount this is not
+  # needed — leave all fields empty and the API will use in-cluster auth.
+  #
+  # When running outside the cluster (or when in-cluster RBAC is insufficient):
+  #   Option A — supply the kubeconfig file content directly (chart-managed Secret):
+  #     kubeconfig: |
+  #       apiVersion: v1
+  #       kind: Config
+  #       ...
+  #   Option B — reference a pre-existing Secret (recommended for production):
+  #     existingKubeconfigSecret: "my-kubeconfig-secret"
+  #     existingKubeconfigSecretKey: "config"   # key inside the Secret (default: "config")
+  #
+  # The kubeconfig is mounted read-only at /etc/kubeconfig/config and the
+  # KUBECONFIG env var is set to that path.
+  kubeconfig: ""                    # Raw kubeconfig YAML. Stored in a chart-managed Secret.
+  existingKubeconfigSecret: ""      # Name of a pre-existing Secret containing the kubeconfig.
+  existingKubeconfigSecretKey: "config"
 
   # Ingress for the API (typically internal / restricted)
   ingress:
@@ -44,7 +81,7 @@ api:
   arc:
     chartRepo: "oci://ghcr.io/actions/actions-runner-controller-charts"
     chartName: "gha-runner-scale-set"
-    chartVersion: "0.9.3"
+    chartVersion: "0.13.1"
     controllerNamespace: "arc-system"
 
   # Platform-wide runner defaults (teams override per scale set)
@@ -92,6 +129,20 @@ frontend:
   service:
     type: ClusterIP
     port: 3000
+
+  # ── Frontend authentication mode ────────────────────────────────────────────
+  # Single-key mode (default): set apiKey to a token that exists in api.apiTokens
+  # (or api.apiKey). The frontend injects it server-side; no browser login needed.
+  #
+  # Multi-user mode: leave apiKey empty and set api.allowReadonlyUnauthenticated=true.
+  # Unauthenticated users get read-only access; users log in via a browser token form.
+  #
+  # To use a pre-existing Secret for the frontend token:
+  #   existingApiKeySecret: "my-secret"
+  #   existingApiKeySecretKey: "api-key"
+  apiKey: ""                    # Token for single-key mode. Empty = multi-user mode.
+  existingApiKeySecret: ""      # Pre-existing Secret containing the frontend token.
+  existingApiKeySecretKey: "api-key"
 
   ingress:
     enabled: false

@@ -10,7 +10,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-s -w" -o /bin/arc-runner-manager-frontend .
 
 # ── runtime stage ─────────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static:nonroot
+FROM alpine:3
+
+RUN apk add --no-cache ca-certificates wget
 
 COPY --from=builder /bin/arc-runner-manager-frontend /arc-runner-manager-frontend
 COPY static/ /app/static/
@@ -18,5 +20,6 @@ COPY static/ /app/static/
 EXPOSE 3000
 ENV STATIC_DIR=/app/static
 
-USER nonroot:nonroot
+# Run as non-root (alpine's nobody uid=65534).
+USER nobody:nobody
 ENTRYPOINT ["/arc-runner-manager-frontend"]

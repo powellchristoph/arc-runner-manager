@@ -1,0 +1,35 @@
+{{- if .Values.api.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "arc-runner-manager.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arc-runner-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- with .Values.api.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.api.ingress.className }}
+  ingressClassName: {{ .Values.api.ingress.className }}
+  {{- end }}
+  {{- if .Values.api.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.api.ingress.host | quote }}
+      secretName: {{ .Values.api.ingress.tls.secretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.api.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "arc-runner-manager.fullname" . }}-api
+                port:
+                  name: http
+{{- end }}

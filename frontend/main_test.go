@@ -401,3 +401,308 @@ func TestStaticDoesNotHitBackend(t *testing.T) {
 		t.Error("/static/* should not have proxied to backend")
 	}
 }
+
+// ── Single-key mode: /auth/me always responds; login/logout not registered ────
+
+func TestSingleKeyMode_AuthMe_AlwaysAuthenticated(t *testing.T) {
+	srv := newTestServer(t, "http://localhost:9999", "some-key", "")
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var body map[string]bool
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("single-key /auth/me should return JSON, got %q: %v", w.Body.String(), err)
+	}
+	if !body["authenticated"] {
+		t.Error("expected authenticated=true in single-key mode")
+	}
+	if body["multiUser"] {
+		t.Error("expected multiUser=false in single-key mode")
+	}
+}
+
+func TestSingleKeyMode_LoginLogout_NotRegistered(t *testing.T) {
+	srv := newTestServer(t, "http://localhost:9999", "some-key", "")
+	// /auth/login and /auth/logout fall through to handleIndex in single-key mode.
+	// They must NOT return JSON auth responses.
+	for _, path := range []string{"/auth/login", "/auth/logout"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		body := w.Body.String()
+		if strings.Contains(body, `"authenticated"`) {
+			t.Errorf("single-key mode: %s should not return auth JSON, got %s", path, body)
+		}
+	}
+}
+
+// ── Multi-user mode helpers ───────────────────────────────────────────────────
+
+// fakeValidatingBackend starts a backend that returns 200 only when the
+// Authorization header matches validToken.
+func fakeValidatingBackend(t *testing.T, validToken string) *httptest.Server {
+	t.Helper()
+	return fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+validToken {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"items":[],"total":0}`)) //nolint:errcheck
+		} else {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"invalid token"}`)) //nolint:errcheck
+		}
+	})
+}
+
+// sessionCookie extracts the arc_session cookie value from a recorder.
+func sessionCookie(w *httptest.ResponseRecorder) string {
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "arc_session" {
+			return c.Value
+		}
+	}
+	return ""
+}
+
+// ── /auth/me ─────────────────────────────────────────────────────────────────
+
+func TestMultiUserMode_AuthMe_Unauthenticated(t *testing.T) {
+	srv := newTestServer(t, "http://localhost:9999", "", "")
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var body map[string]bool
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["authenticated"] {
+		t.Error("expected authenticated=false for unauthenticated request")
+	}
+}
+
+func TestMultiUserMode_AuthMe_WrongMethod(t *testing.T) {
+	srv := newTestServer(t, "http://localhost:9999", "", "")
+	req := httptest.NewRequest(http.MethodPost, "/auth/me", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ── /auth/login ──────────────────────────────────────────────────────────────
+
+func TestMultiUserMode_Login_InvalidToken(t *testing.T) {
+	be := fakeValidatingBackend(t, "good-token")
+	srv := newTestServer(t, be.URL, "", "")
+
+	body := strings.NewReader(`{"token":"bad-token"}`)
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for invalid token, got %d", w.Code)
+	}
+	if sid := sessionCookie(w); sid != "" {
+		t.Error("session cookie must not be set for invalid token")
+	}
+}
+
+func TestMultiUserMode_Login_ValidToken(t *testing.T) {
+	be := fakeValidatingBackend(t, "good-token")
+	srv := newTestServer(t, be.URL, "", "")
+
+	body := strings.NewReader(`{"token":"good-token"}`)
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]bool
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp["authenticated"] {
+		t.Error("expected authenticated=true after successful login")
+	}
+	if sid := sessionCookie(w); sid == "" {
+		t.Error("expected arc_session cookie to be set after login")
+	}
+}
+
+func TestMultiUserMode_Login_MissingToken(t *testing.T) {
+	srv := newTestServer(t, "http://localhost:9999", "", "")
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing token, got %d", w.Code)
+	}
+}
+
+func TestMultiUserMode_Login_WrongMethod(t *testing.T) {
+	srv := newTestServer(t, "http://localhost:9999", "", "")
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ── /auth/me after login ──────────────────────────────────────────────────────
+
+func TestMultiUserMode_AuthMe_AfterLogin(t *testing.T) {
+	be := fakeValidatingBackend(t, "good-token")
+	srv := newTestServer(t, be.URL, "", "")
+
+	// Login to get a session cookie.
+	loginBody := strings.NewReader(`{"token":"good-token"}`)
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", loginBody)
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(loginW, loginReq)
+
+	sid := sessionCookie(loginW)
+	if sid == "" {
+		t.Fatal("login did not set session cookie")
+	}
+
+	// Now call /auth/me with the session cookie.
+	meReq := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	meReq.AddCookie(&http.Cookie{Name: "arc_session", Value: sid})
+	meW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(meW, meReq)
+
+	if meW.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", meW.Code)
+	}
+	var resp map[string]bool
+	if err := json.Unmarshal(meW.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp["authenticated"] {
+		t.Error("expected authenticated=true after login")
+	}
+}
+
+// ── /auth/logout ─────────────────────────────────────────────────────────────
+
+func TestMultiUserMode_Logout(t *testing.T) {
+	be := fakeValidatingBackend(t, "good-token")
+	srv := newTestServer(t, be.URL, "", "")
+
+	// Login first.
+	loginBody := strings.NewReader(`{"token":"good-token"}`)
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", loginBody)
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(loginW, loginReq)
+	sid := sessionCookie(loginW)
+
+	// Logout.
+	logoutReq := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	logoutReq.AddCookie(&http.Cookie{Name: "arc_session", Value: sid})
+	logoutW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(logoutW, logoutReq)
+	if logoutW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from logout, got %d", logoutW.Code)
+	}
+
+	// /auth/me should now report unauthenticated.
+	meReq := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	meReq.AddCookie(&http.Cookie{Name: "arc_session", Value: sid})
+	meW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(meW, meReq)
+	var resp map[string]bool
+	if err := json.Unmarshal(meW.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["authenticated"] {
+		t.Error("expected authenticated=false after logout")
+	}
+}
+
+// ── Multi-user proxy: no session → no auth header forwarded ──────────────────
+
+func TestMultiUserMode_Proxy_NoSession_NoAuthHeader(t *testing.T) {
+	var gotAuth string
+	be := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"items":[],"total":0}`)) //nolint:errcheck
+	})
+
+	srv := newTestServer(t, be.URL, "", "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runners", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if gotAuth != "" {
+		t.Errorf("expected no Authorization header for unauthenticated proxy, got %q", gotAuth)
+	}
+}
+
+// Multi-user proxy: valid session → token injected.
+func TestMultiUserMode_Proxy_WithSession_InjectsToken(t *testing.T) {
+	var gotAuth string
+	be := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"items":[],"total":0}`)) //nolint:errcheck
+	})
+
+	srv := newTestServer(t, be.URL, "", "")
+
+	// Manually insert a session.
+	sid := "test-session-id"
+	srv.sessions.Store(sid, "my-api-token")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runners", nil)
+	req.AddCookie(&http.Cookie{Name: "arc_session", Value: sid})
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if gotAuth != "Bearer my-api-token" {
+		t.Errorf("expected 'Bearer my-api-token', got %q", gotAuth)
+	}
+}
+
+// Session cookie must never be forwarded to the backend.
+func TestMultiUserMode_Proxy_SessionCookieNotForwarded(t *testing.T) {
+	var gotCookie string
+	be := fakeBackend(t, func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`)) //nolint:errcheck
+	})
+
+	srv := newTestServer(t, be.URL, "", "")
+	sid := "test-session-id"
+	srv.sessions.Store(sid, "my-api-token")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runners", nil)
+	req.AddCookie(&http.Cookie{Name: "arc_session", Value: sid})
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if gotCookie != "" {
+		t.Errorf("session cookie must not be forwarded to backend, got Cookie: %q", gotCookie)
+	}
+}

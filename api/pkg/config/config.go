@@ -7,6 +7,7 @@ import (
 	"strconv"
 )
 
+
 // Config holds all runtime configuration for the API server.
 type Config struct {
 	// Server
@@ -34,6 +35,11 @@ type Config struct {
 	DefaultCPULimit      string
 	DefaultMemoryRequest string
 	DefaultMemoryLimit   string
+
+	// AllowReadonlyUnauthenticated permits unauthenticated GET requests to /api/v1/*.
+	// POST, PUT, and DELETE still require a valid Bearer token.
+	// Enables browser read-only access without a token.
+	AllowReadonlyUnauthenticated bool
 }
 
 func Load() (*Config, error) {
@@ -51,12 +57,17 @@ func Load() (*Config, error) {
 		DefaultCPURequest:    getEnv("DEFAULT_CPU_REQUEST", "500m"),
 		DefaultCPULimit:      getEnv("DEFAULT_CPU_LIMIT", "2"),
 		DefaultMemoryRequest: getEnv("DEFAULT_MEMORY_REQUEST", "1Gi"),
-		DefaultMemoryLimit:   getEnv("DEFAULT_MEMORY_LIMIT", "4Gi"),
+		DefaultMemoryLimit:           getEnv("DEFAULT_MEMORY_LIMIT", "4Gi"),
+		AllowReadonlyUnauthenticated: getEnvBool("ALLOW_READONLY_UNAUTHENTICATED", false),
 	}
 
 	tokens, err := loadTokens()
 	if err != nil {
 		return nil, err
+	}
+	if len(tokens) == 0 && !cfg.AllowReadonlyUnauthenticated {
+		fmt.Fprintln(os.Stderr, "FATAL: set API_TOKENS (JSON map) or API_KEY, or enable ALLOW_READONLY_UNAUTHENTICATED")
+		os.Exit(1)
 	}
 	cfg.APITokens = tokens
 	return cfg, nil
@@ -92,14 +103,22 @@ func loadTokens() (map[string]string, error) {
 		return map[string]string{"default": key}, nil
 	}
 
-	fmt.Fprintln(os.Stderr, "FATAL: set API_TOKENS (JSON map) or API_KEY")
-	os.Exit(1)
-	return nil, nil
+	// No tokens configured — valid only when AllowReadonlyUnauthenticated is true.
+	return map[string]string{}, nil
 }
 
 func getEnv(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if v, ok := os.LookupEnv(key); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
 	}
 	return fallback
 }

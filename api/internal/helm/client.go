@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
@@ -14,8 +15,8 @@ import (
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/client-go/rest"
 
-	"github.com/powellchristoph/arc-runner-managerinternal/models"
-	"github.com/powellchristoph/arc-runner-managerpkg/config"
+	"github.com/powellchristoph/arc-runner-manager/internal/models"
+	"github.com/powellchristoph/arc-runner-manager/pkg/config"
 )
 
 const (
@@ -207,7 +208,8 @@ func (c *Client) Uninstall(ctx context.Context, team string) error {
 	}
 
 	uninstaller := action.NewUninstall(ac)
-	uninstaller.Wait = false
+	uninstaller.Wait = true
+	uninstaller.Timeout = 3 * time.Minute
 
 	c.logger.Info("uninstalling helm release", "release", releaseName(team), "namespace", ns)
 	_, err = uninstaller.Run(releaseName(team))
@@ -217,12 +219,50 @@ func (c *Client) Uninstall(ctx context.Context, team string) error {
 	return nil
 }
 
+// UpgradeChart bumps an existing runner scale set to the currently configured
+// chart version, preserving all existing Helm values unchanged.
+func (c *Client) UpgradeChart(ctx context.Context, team string) error {
+	ns := namespace(team)
+	ac, err := c.actionConfig(ns)
+	if err != nil {
+		return err
+	}
+
+	ch, err := c.loadChart(ctx)
+	if err != nil {
+		return err
+	}
+
+	getter := action.NewGet(ac)
+	existing, err := getter.Run(releaseName(team))
+	if err != nil {
+		return fmt.Errorf("helm get %s: %w", releaseName(team), err)
+	}
+
+	upgrader := action.NewUpgrade(ac)
+	upgrader.Namespace = ns
+	upgrader.Wait = true
+	upgrader.Timeout = 3 * time.Minute
+	upgrader.ReuseValues = false
+
+	c.logger.Info("upgrading chart version", "release", releaseName(team), "version", c.cfg.ARCChartVersion)
+	_, err = upgrader.RunWithContext(ctx, releaseName(team), ch, existing.Config)
+	if err != nil {
+		return fmt.Errorf("helm upgrade %s: %w", releaseName(team), err)
+	}
+	return nil
+}
+
 // loadChart fetches the ARC runner scale set chart.
 // Supports both OCI references (oci://...) and HTTP repo URLs.
 // The chart is cached in /tmp/helm-charts after first pull.
 func (c *Client) loadChart(ctx context.Context) (*chart.Chart, error) {
 	cacheDir := "/tmp/helm-charts"
-	chartPath := fmt.Sprintf("%s/%s", cacheDir, c.cfg.ARCChartName)
+	// Each version gets its own subdirectory so that changing ARCChartVersion
+	// forces a fresh pull and concurrent upgrades share the same cached chart.
+	// Helm untars into <UntarDir>/<chartName>/, so chartPath points there.
+	versionedDir := fmt.Sprintf("%s/%s-%s", cacheDir, c.cfg.ARCChartName, c.cfg.ARCChartVersion)
+	chartPath := fmt.Sprintf("%s/%s", versionedDir, c.cfg.ARCChartName)
 
 	// Return cached chart if present — avoids a registry round-trip on every install.
 	if ch, err := loader.Load(chartPath); err == nil {
@@ -230,7 +270,7 @@ func (c *Client) loadChart(ctx context.Context) (*chart.Chart, error) {
 		return ch, nil
 	}
 
-	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+	if err := os.MkdirAll(versionedDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create chart cache dir: %w", err)
 	}
 
@@ -239,9 +279,9 @@ func (c *Client) loadChart(ctx context.Context) (*chart.Chart, error) {
 	pull := action.NewPullWithOpts(action.WithConfig(&action.Configuration{}))
 	pull.Settings = settings
 	pull.Version = c.cfg.ARCChartVersion
-	pull.DestDir = cacheDir
+	pull.DestDir = versionedDir
 	pull.Untar = true
-	pull.UntarDir = cacheDir
+	pull.UntarDir = versionedDir
 
 	// OCI and HTTP repos are referenced differently.
 	// OCI:  chartRef = full oci:// URI, RepoURL stays empty.
@@ -263,6 +303,7 @@ func (c *Client) loadChart(ctx context.Context) (*chart.Chart, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load chart from %s: %w", chartPath, err)
 	}
+	c.logger.Info("chart cached", "path", chartPath)
 	return ch, nil
 }
 

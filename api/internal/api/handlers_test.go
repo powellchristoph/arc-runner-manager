@@ -15,9 +15,9 @@ import (
 	helmchart "helm.sh/helm/v3/pkg/chart"
 	helmrelease "helm.sh/helm/v3/pkg/release"
 
-	"github.com/powellchristoph/arc-runner-managerinternal/api"
-	"github.com/powellchristoph/arc-runner-managerinternal/models"
-	"github.com/powellchristoph/arc-runner-managerpkg/config"
+	"github.com/powellchristoph/arc-runner-manager/internal/api"
+	"github.com/powellchristoph/arc-runner-manager/internal/models"
+	"github.com/powellchristoph/arc-runner-manager/pkg/config"
 )
 
 // ── fakes ─────────────────────────────────────────────────────────────────────
@@ -45,6 +45,9 @@ func (f *fakeHelm) Install(_ context.Context, rss *models.RunnerScaleSet) (*helm
 }
 func (f *fakeHelm) Upgrade(_ context.Context, rss *models.RunnerScaleSet) (*helmrelease.Release, error) {
 	return minRelease(rss.Name), f.err
+}
+func (f *fakeHelm) UpgradeChart(_ context.Context, team string) error {
+	return f.err
 }
 func (f *fakeHelm) Uninstall(_ context.Context, team string) error {
 	for _, r := range f.releases {

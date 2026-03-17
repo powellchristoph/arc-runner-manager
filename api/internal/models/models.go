@@ -8,7 +8,7 @@ type RunnerScaleSet struct {
 	Name string `json:"name"`
 
 	// GitHubConfigURL is the org or repo URL the runners register against.
-	// e.g. "https://github.com/orgs/your-org" or "https://kaseya.com/repo"
+	// e.g. "https://github.com/orgs/your-org" or "https://github.com/powellchristoph/repo"
 	GitHubConfigURL string `json:"githubConfigUrl"`
 
 	// RunnerScaleSetName is the label used in runs-on: in workflows.

@@ -56,6 +56,7 @@ func (c *Client) EnsureNamespace(ctx context.Context, ns string) error {
 
 // DeleteNamespace removes the namespace (and everything in it).
 func (c *Client) DeleteNamespace(ctx context.Context, ns string) error {
+	c.logger.Info("deleting namespace", "namespace", ns)
 	err := c.cs.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{})
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete namespace %s: %w", ns, err)

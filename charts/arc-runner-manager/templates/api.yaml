@@ -5,7 +5,27 @@
     2. apiTokens      — JSON map of name→token, stored in a chart-managed secret
     3. apiKey         — legacy single token, stored as {"default":"<key>"}
 */ -}}
+{{- /*
+  Chart-managed kubeconfig Secret (only when api.kubeconfig is set and
+  api.existingKubeconfigSecret is not).
+*/ -}}
+{{- if and .Values.api.kubeconfig (not .Values.api.existingKubeconfigSecret) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "arc-runner-manager.fullname" . }}-kubeconfig
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "arc-runner-manager.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  config: {{ .Values.api.kubeconfig | quote }}
+---
+{{- end }}
 {{- if not .Values.api.existingSecret }}
+{{- if and (not .Values.api.apiTokens) (not .Values.api.apiKey) (not .Values.api.allowReadonlyUnauthenticated) }}
+  {{- fail "One of api.existingSecret, api.apiTokens, or api.apiKey must be set (or set api.allowReadonlyUnauthenticated=true for read-only public access with no write tokens)" }}
+{{- end }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -18,9 +38,12 @@ stringData:
   {{- if .Values.api.apiTokens }}
   api-tokens: {{ .Values.api.apiTokens | quote }}
   {{- else if .Values.api.apiKey }}
+  {{- /* Store as both a JSON map (for the API) and a raw value (for the frontend). */}}
   api-tokens: {{ printf "{\"default\":%q}" .Values.api.apiKey | quote }}
+  api-key: {{ .Values.api.apiKey | quote }}
   {{- else }}
-  {{ fail "One of api.existingSecret, api.apiTokens, or api.apiKey must be set" }}
+  {{- /* allowReadonlyUnauthenticated=true with no tokens: empty map, writes always 401. */}}
+  api-tokens: "{}"
   {{- end }}
 {{- end }}
 ---
@@ -107,14 +130,33 @@ spec:
               value: {{ .Values.api.defaults.memoryRequest | quote }}
             - name: DEFAULT_MEMORY_LIMIT
               value: {{ .Values.api.defaults.memoryLimit | quote }}
+            - name: ALLOW_READONLY_UNAUTHENTICATED
+              value: {{ .Values.api.allowReadonlyUnauthenticated | quote }}
+            {{- if or .Values.api.kubeconfig .Values.api.existingKubeconfigSecret }}
+            - name: KUBECONFIG
+              value: "/etc/kubeconfig/config"
+            {{- end }}
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if or .Values.api.kubeconfig .Values.api.existingKubeconfigSecret }}
+            - name: kubeconfig
+              mountPath: /etc/kubeconfig
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if or .Values.api.kubeconfig .Values.api.existingKubeconfigSecret }}
+        - name: kubeconfig
+          secret:
+            secretName: {{ if .Values.api.existingKubeconfigSecret }}{{ .Values.api.existingKubeconfigSecret }}{{ else }}{{ include "arc-runner-manager.fullname" . }}-kubeconfig{{ end }}
+            items:
+              - key: {{ .Values.api.existingKubeconfigSecretKey | default "config" }}
+                path: config
+        {{- end }}
       {{- with .Values.api.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -1,4 +1,4 @@
-module kaseya.com/arc-runner-manager
+module github.com/powellchristoph/arc-runner-manager
 
 go 1.25.8
 

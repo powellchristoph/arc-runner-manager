@@ -17,11 +17,11 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/powellchristoph/arc-runner-managerinternal/api"
-	helmclient "github.com/powellchristoph/arc-runner-managerinternal/helm"
-	"github.com/powellchristoph/arc-runner-managerinternal/k8s"
-	authmiddleware "github.com/powellchristoph/arc-runner-managerinternal/middleware"
-	"github.com/powellchristoph/arc-runner-managerpkg/config"
+	"github.com/powellchristoph/arc-runner-manager/internal/api"
+	helmclient "github.com/powellchristoph/arc-runner-manager/internal/helm"
+	"github.com/powellchristoph/arc-runner-manager/internal/k8s"
+	authmiddleware "github.com/powellchristoph/arc-runner-manager/internal/middleware"
+	"github.com/powellchristoph/arc-runner-manager/pkg/config"
 )
 
 func main() {
@@ -64,17 +64,32 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.RequestID)
 	r.Use(chimiddleware.RealIP)
-	r.Use(chimiddleware.Logger)
+	r.Use(func(next http.Handler) http.Handler {
+		log := chimiddleware.Logger(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			log.ServeHTTP(w, r)
+		})
+	})
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.Timeout(60 * time.Second))
 
-	// /healthz is unauthenticated — register before auth middleware.
+	// /healthz and /api/v1/defaults are unauthenticated — register before auth middleware.
 	r.Get("/healthz", handler.Healthz)
+	r.Get("/api/v1/defaults", handler.GetDefaults)
 
 	// All /api/v1 routes require Bearer token auth.
+	// In readonly mode, unauthenticated GET requests are permitted.
 	r.Group(func(r chi.Router) {
 		tokenStore := authmiddleware.NewTokenStore(cfg.APITokens)
-		r.Use(authmiddleware.BearerAuth(tokenStore))
+		if cfg.AllowReadonlyUnauthenticated {
+			r.Use(authmiddleware.ReadonlyBearerAuth(tokenStore))
+		} else {
+			r.Use(authmiddleware.BearerAuth(tokenStore))
+		}
 		handler.RegisterRoutes(r)
 	})
 

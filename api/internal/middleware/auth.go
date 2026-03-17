@@ -67,6 +67,47 @@ func BearerAuth(store *TokenStore) func(http.Handler) http.Handler {
 	}
 }
 
+// ReadonlyBearerAuth returns middleware that allows unauthenticated GET and HEAD
+// requests while still requiring a valid Bearer token for write operations.
+// If a GET arrives with a valid token, the token name is stored in context for
+// audit logging (same as BearerAuth). Anonymous GETs pass through without one.
+func ReadonlyBearerAuth(store *TokenStore) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+					if name := store.Validate(strings.TrimPrefix(h, "Bearer ")); name != "" {
+						ctx := context.WithValue(r.Context(), tokenNameKey, name)
+						r = r.WithContext(ctx)
+					}
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Write methods require a valid Bearer token.
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				writeUnauthorized(w, "missing Authorization header")
+				return
+			}
+			const prefix = "Bearer "
+			if !strings.HasPrefix(authHeader, prefix) {
+				writeUnauthorized(w, "Authorization header must use Bearer scheme")
+				return
+			}
+			token := strings.TrimPrefix(authHeader, prefix)
+			name := store.Validate(token)
+			if name == "" {
+				writeUnauthorized(w, "invalid API key")
+				return
+			}
+			ctx := context.WithValue(r.Context(), tokenNameKey, name)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // TokenNameFromContext returns the authenticated token name from the context,
 // or "unknown" if not present. Use in structured log fields for audit trails.
 func TokenNameFromContext(ctx context.Context) string {

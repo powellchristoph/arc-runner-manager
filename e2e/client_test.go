@@ -178,6 +178,13 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// readonlyMode reports whether the API is running with ALLOW_READONLY_UNAUTHENTICATED=true.
+// Set this env var in the test environment to match the API's configuration.
+func readonlyMode() bool {
+	v := os.Getenv("ALLOW_READONLY_UNAUTHENTICATED")
+	return v == "true" || v == "1"
+}
+
 // checkAPIAvailable fails the test immediately if the API is not reachable.
 // All tests call this so a missing API is a clear error, not a silent skip.
 func checkAPIAvailable(t *testing.T, c *client) {
