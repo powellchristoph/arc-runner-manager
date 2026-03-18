@@ -27,45 +27,6 @@ Each team runner scale set maps to:
 - Namespace: `arc-<team>`
 - Secret: `arc-<team>-github-app` (GitHub App credentials, write-only via API)
 
-## Repository structure
-
-```
-arc-runner-manager/
-  api/                          Go REST API (Helm SDK + k8s client)
-    cmd/server/main.go
-    internal/
-      api/handlers.go           HTTP handlers
-      helm/client.go            Helm install/upgrade/uninstall/list
-      k8s/client.go             Namespace, secret, pod management
-      middleware/auth.go        Bearer token middleware
-      models/models.go          Domain types
-    pkg/config/config.go
-    Dockerfile
-    README.md
-
-  frontend/                     Go HTTP server + Bootstrap 5 UI
-    main.go                     Static file server + API proxy
-    static/
-      index.html
-      js/app.js
-    Dockerfile
-    README.md
-
-  charts/
-    arc-runner-manager/         Helm chart deploying both services
-      Chart.yaml
-      values.yaml
-      templates/
-        _helpers.tpl
-        rbac.yaml               ServiceAccount + ClusterRole + ClusterRoleBinding
-        api.yaml                API Deployment + Service + Secret
-        frontend.yaml           Frontend Deployment + Service + (optional) Ingress
-
-  .github/workflows/ci.yaml     CI: build, test, helm lint, publish to GHCR
-  docker-compose.yaml           Local dev
-  skaffold.yaml                 Local k8s dev (Skaffold)
-```
-
 ## Deployment
 
 ### Prerequisites
